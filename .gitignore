@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.venv/
+mpm_scratch/output/
+.DS_Store
