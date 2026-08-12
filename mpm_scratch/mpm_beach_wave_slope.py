@@ -1,0 +1,776 @@
+"""
+mpm_beach_wave_slope.py
+========================
+mpm_beach_wave.py をベースに、**海底勾配(沖に向かって深くなる海底地形)**を
+導入した版。Material Point Method (MPM) のみを用いた、仮想の**沖合養浜マウンド
+断面**の自重下変形解析。
+
+mpm_beach_wave.py との違い
+--------------------------
+- mpm_beach_wave.py は「局所的に平坦な海底(y=0)」を仮定していたが、本ファイル
+  では海底標高を岸沖距離 x の関数 `bed_elevation(x)` として新たに導入し、
+  沖(xが大きい側)に向かうほど海底が深くなる(標高 y が小さくなる)一様勾配を
+  与える。マウンド断面(台形)はこの海底線の上に「乗る」形で配置され、
+  格子の下端固定境界条件(剛な不透過基盤)も、この海底線に沿うように
+  x位置ごとに切り替わる。
+- それ以外(MLS-MPM本体、Drucker-Prager砂塑性、波浪外力モデル、可視化)は
+  mpm_beach_wave.py と同一のロジックを流用している。
+
+沖合養浜とは
+------------
+養浜のうち、前浜(汀線付近)に直接土砂を盛って渚を広げる「前浜養浜」とは異なり、
+**沖合の海底上に土砂マウンド(人工海底山・サンドバー)を造成し、常時水没させた
+状態で設置する**手法を「沖合養浜」と呼ぶ。マウンドは静水面(SWL)より十分深い
+位置に天端があり、波によって徐々に土砂が岸側へ移動する(あるいは波浪減衰・
+底質供給源として機能する)ことを狙いとする。
+
+このコードでできること
+-----------------------
+- 沖に向かって深くなる勾配を持つ海底地形上に設置された、水没マウンド断面
+  (沖側スロープ+天端+岸側スロープ、天端は静水面下)を MPM 粒子群として生成する。
+- 重力(水中の浮力を考慮した水中単位体積重量)を外力として、マウンドが
+  自重で沈下・法面が崩れて安定形状(水中安息角)に近づく様子を計算する。
+- 静水面(SWL)以下かつ、その時点(変形後)のマウンド表面から一定の厚み
+  (活動層, WAVE_ACTIVE_LAYER)以内にある格子ノードに、線形波理論(Airy波)
+  による水平往復流速(orbital velocity)を「目標流速」として与える簡易振動流
+  モデルにより、波浪による周期的なせん断外力を砂粒子に作用させる(外部波浪
+  モデルとのカップリングなしの近似)。表面から深く埋もれた内部の粒子には
+  直接作用させない(実際の波が海底面近傍にしか直接影響しないことに対応)。
+  これにより、自重変形だけでは生じない、波の往復作用によるマウンドの
+  緩やかな変形・移動・侵食を再現する。
+- 静水面(SWL)と海底線(bed_elevation)を基準線として図示し、マウンドが
+  常に水没した状態にあることを可視化する。
+- 計算結果(粒子位置)をスナップショット保存し、初期断面と最終断面を
+  比較するプロットを出力する。
+
+このコードで「できないこと」(意図的に含めていない要素)
+-----------------------------------------------------
+- 実際の流体(水)の運動方程式は解いていない。波浪外力は「線形波理論に
+  基づく目標流速に格子速度を緩和的に近づける」簡易抗力モデルであり、
+  水そのものの質量・圧力・乱流・砕波・戻り流れ(undertow)は表現しない。
+- 波の空間的な位相差(kx)は無視している(計算領域が波長に比べ短いことを
+  踏まえた簡略化)。波の分散関係も、海底勾配を無視した一様水深 WATER_LEVEL
+  を用いて評価しており(浅水変形・屈折は考慮しない)、また対称な線形波のみを
+  与えており、浅水変形に伴う波形の非対称性(スキューネス)は含まないため、
+  往復流だけでは片方向への正味の岸向き移動は必ずしも生じない(往復せん断に
+  よる緩み・沈下・法面変形が主体)。
+- 侵食・堆積量の定量評価(体積収支等)は含まない。
+- 複数材料(海底の在来砂と養浜材の区別)は含まない。単一材料のみ
+  (海底地形自体は剛な不透過基盤として境界条件で表現し、変形しない)。
+これらは本コードを土台として、必要に応じて拡張していくことを想定している
+(ファイル末尾の「拡張のヒント」を参照)。
+
+数値手法
+--------
+- MLS-MPM (Moving Least Squares MPM, Hu et al. 2018) を陽解法・
+  2次 B-スプライン形状関数・APIC (Affine Particle-In-Cell) で実装。
+- 砂の構成則: Hencky(対数ひずみ)弾性 + Drucker-Prager 完全塑性。
+  変形勾配 F の特異値分解(SVD)を用いたリターンマッピングにより
+  塑性変形を扱う (Klar et al. 2016, "Drucker-Prager Elastoplasticity
+  for Sand Animation", ACM TOG/SIGGRAPH 2016 の手法に基づく)。
+- 依存ライブラリは numpy と matplotlib のみ。
+
+参考: Stomakhin et al. (2013) MLS-MPM/APIC の枠組みは
+Hu et al. (2018) "A Moving Least Squares Material Point Method with
+Displacement Discontinuity and Two-Way Rigid Body Coupling" のアルゴリズムに
+概ね準拠(教育目的で公開されている軽量MPM実装 (mpm99/mpm128 系) と
+同様の定式化)。
+
+VSCode での実行方法
+--------------------
+- Python拡張機能がインストールされていれば、このファイルは `# %%` の
+  セル区切りごとに「Run Cell」でインタラクティブウィンドウ実行できる
+  (matplotlibの図がウィンドウ内にインライン表示される)。
+- 単純に「Run Python File」(通常のスクリプト実行)でも、グラフウィンドウが
+  ポップアップ表示され、かつ output/ に PNG が保存される。
+- 推奨インタプリタ: mpm_scratch/.venv (numpy, matplotlib のみを含む
+  専用の軽量venv。 .vscode/settings.json で自動的に指定される)。
+"""
+
+
+import os
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.family"] = ["Hiragino Sans", "sans-serif"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+
+# ============================================================================
+# 1. パラメータ設定 (ここを書き換えて条件を変える)
+# ============================================================================
+
+# ---- 背景格子 ----
+DX = 0.02          # 格子間隔 [m]
+LX = 2.6           # 計算領域の x方向長さ(岸沖方向)[m]
+LY = 1.0           # 計算領域の y方向長さ(鉛直方向)[m]
+BOUND = 3          # 境界条件を課す格子層の厚さ(ノード数)
+
+# ---- 静水面(SWL: Still Water Level) ----
+# 沖合養浜マウンドは常時水没しているため、比較・可視化の基準として
+# 静水面を明示的に持たせる(波浪計算はしないので力学には効かない)。
+WATER_LEVEL = 0.55   # 静水面の y座標 [m]
+
+# ---- 海底地形(沖に向かって深くなる勾配)----
+# mpm_beach_wave.py では海底を「局所的に平坦(y=0)」と仮定していたが、
+# ここでは海底標高を x の一次関数として与え、沖側(xが大きい側)ほど
+# 標高が下がる(水深が深くなる)一様勾配を導入する。
+BED_Y0 = 0.15       # 岸側基準点(x=0)での海底標高 [m]
+BED_SLOPE = 0.05    # 海底勾配 tanβ [-] (正の値: xが増えるほど標高が下がる)
+                    # 例: 0.05 は約 1:20 勾配(β≈2.9°)相当の緩勾配。
+
+# ---- 仮想の沖合養浜マウンドの初期断面形状 ----
+# 台形断面(海底からの比高で定義): 海底が沖に向かって深くなる地形の上に、
+# 沖側・岸側どちらの法尻も水没したまま盛り上がるマウンドを配置する
+# (陸に接する「盛土」ではない)。
+X_TOE_NEARSHORE = 0.4   # 岸側(浅い側)法尻の x座標 [m]
+X_CREST_START = 1.0     # 天端(マウンド上面)開始の x座標 [m]
+X_CREST_END = 1.6       # 天端終了の x座標 [m]
+X_TOE_OFFSHORE = 2.1    # 沖側(深い側)法尻の x座標 [m]
+MOUND_HEIGHT = 0.35     # マウンド高さ(海底からの比高)[m]
+PARTICLES_PER_CELL = 2  # 1格子1辺あたりの粒子分割数(実際は この2乗個/セル)
+
+
+def bed_elevation(x):
+    """岸沖距離 x [m] における海底(基盤)の標高 y [m] を返す。
+
+    沖(xが大きい)に向かうほど標高が下がる = 深くなる、一様勾配の海底地形。
+    (mound_surface_height() のベースラインとして用いる。)
+    """
+    return BED_Y0 - BED_SLOPE * x
+
+
+# マウンド天端の水没深さ(被覆水深)。天端は海底勾配に沿って標高が変わるため、
+# 最も浅くなる岸側の天端開始点(X_CREST_START)で評価した、最も厳しい
+# (=水没が最も浅い)ケースを代表値とする。正であれば天端は常に水面下にある。
+SUBMERGENCE = WATER_LEVEL - (bed_elevation(X_CREST_START) + MOUND_HEIGHT)
+
+# ---- 砂の材料物性(水中砂: 沖合養浜マウンドは常時水没している) ----
+SAND_DENSITY_SAT = 1950.0   # 飽和砂の密度(間隙が海水で満たされた状態)[kg/m3]
+WATER_DENSITY = 1025.0      # 海水の密度 [kg/m3]
+RHO0 = SAND_DENSITY_SAT - WATER_DENSITY
+#   水中単位体積重量(浮力を考慮した「見かけの密度」)。
+#   沖合養浜マウンドは常時水没しているため、自重変形を支配するのは
+#   乾燥密度ではなく水中(浮力差引後)の密度である。本コードは陽解法MPMの
+#   最小構成として、浮力を「密度を水中密度に置き換える」ことで簡易的に
+#   表現している(間隙水圧の時間発展や排水過程は扱っていない)。
+E_MOD = 1.0e6        # ヤング率 [Pa]
+#   注: 陽解法MPMでは時間刻み dt が sqrt(E/rho) に反比例して小さくなるため、
+#   計算コストを抑える目的で実際の水中砂(E~1e7-1e8Pa)より小さい値を
+#   採用している。剛性が計算結果(安息角や崩壊形状)に与える影響は
+#   小さいが、変位の絶対量や収束の速さには影響するので注意。
+NU = 0.3             # ポアソン比 [-]
+FRICTION_DEG = 32.0  # 内部摩擦角 [deg] (Drucker-Prager)
+#   水中砂の内部摩擦角は粒子間の噛み合わせで決まるため、乾燥砂とほぼ
+#   同程度とみなし同じ値を採用している(間隙水による粘性抵抗等の
+#   動的効果は本コードでは扱わない)。
+GRAVITY = 9.81       # 重力加速度 [m/s2]
+
+# ---- 波浪外力(簡易振動流モデル) ----
+# 静水面(WATER_LEVEL)以下の格子ノードに、線形波理論(Airy波)による水平
+# 往復流速(orbital velocity)を「目標流速」として与え、格子速度をその目標値
+# へ緩和(リラクゼーション)させることで、水そのものを解かずに波浪起源の
+# 周期的せん断力を近似的に表現する。値はいずれも研究の出発点となる代表値
+# (このコードの断面自体が仮想断面であり、特定海域の実測波浪ではない)。
+# なお波の分散関係は海底勾配を無視した一様水深 WATER_LEVEL で評価しており、
+# 浅水変形・屈折等の空間的な水深変化の影響は含めていない。
+WAVE_HEIGHT = 0.12       # 代表波高 H [m]
+WAVE_PERIOD = 1.6        # 代表周期 T [s]
+WAVE_DRAG_TIME = 0.05    # 格子速度を目標流速へ緩和させる時定数 tau [s]
+                         # (小さいほど強く引きずられる。0に近づけるほど
+                         #  水と一体で動く極限、大きくすると抗力が弱くなる)
+WAVE_RAMP_CYCLES = 1.5   # 助走区間 [周期数](振幅を0→1へなめらかに立ち上げ、
+                         # 急激な立ち上がりによる数値的な衝撃を避ける)
+WAVE_ACTIVE_LAYER = 0.06 # 波浪外力を作用させる表層の厚み(活動層厚)[m]
+                         # マウンド内部に埋もれた粒子まで一様に流体外力を
+                         # 与えるのは非物理的(実際の波はマウンド表面近傍にしか
+                         # 直接作用しない)なため、その時点の(変形後の)表面から
+                         # この厚み分だけを対象とする。substep() 内で毎ステップ、
+                         # 格子質量から現在の表面位置を検出して判定する。
+
+# ---- 数値計算設定 ----
+CFL = 0.3            # クーラン数(安定限界に対する余裕係数)
+DAMPING = 0.999      # 格子速度への簡易減衰係数(1.0で減衰なし、微小な数値粘性)
+T_TOTAL = 6.0        # 総計算時間 [s] (WAVE_PERIOD=1.6sで約3.75周期分。
+                     # より長期の応答を見たい場合は --t-total で延長できる)
+FRAME_DT = 0.02      # スナップショットを保存する時間間隔 [s]
+
+# ---- 出力 ----
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+
+
+
+# ============================================================================
+# 2. 初期粒子配置(沖合養浜マウンド断面の生成)
+# ============================================================================
+
+def mound_height_profile(x):
+    """岸沖距離 x [m] における、海底からのマウンド比高 [m] を返す(台形断面)。"""
+    y = np.zeros_like(x)
+
+    rise = (x >= X_TOE_NEARSHORE) & (x < X_CREST_START)
+    y[rise] = MOUND_HEIGHT * (x[rise] - X_TOE_NEARSHORE) / (X_CREST_START - X_TOE_NEARSHORE)
+
+    flat = (x >= X_CREST_START) & (x <= X_CREST_END)
+    y[flat] = MOUND_HEIGHT
+
+    fall = (x > X_CREST_END) & (x <= X_TOE_OFFSHORE)
+    y[fall] = MOUND_HEIGHT * (X_TOE_OFFSHORE - x[fall]) / (X_TOE_OFFSHORE - X_CREST_END)
+
+    return y
+
+
+def mound_surface_height(x):
+    """岸沖距離 x [m] における水没マウンド表面の絶対標高 y [m] を返す。
+
+    海底標高 bed_elevation(x)(沖に向かって深くなる勾配)に、台形マウンド
+    断面の比高 mound_height_profile(x) を上乗せしたもの。
+    """
+    return bed_elevation(x) + mound_height_profile(x)
+
+
+def make_mound_particles():
+    """台形マウンド断面の内部を埋めるように粒子を格子状(ppc x ppc/セル)に配置する。
+
+    海底が勾配を持つため、各粒子は「その x位置での海底標高より上、かつ
+    マウンド表面より下」にある場合にのみ採用する。
+    """
+    cell_x = np.arange(0.0, LX, DX)
+    cell_y = np.arange(0.0, LY, DX)
+    sub = (np.arange(PARTICLES_PER_CELL) + 0.5) / PARTICLES_PER_CELL * DX
+
+    px = (cell_x[:, None] + sub[None, :]).ravel()
+    py = (cell_y[:, None] + sub[None, :]).ravel()
+    PX, PY = np.meshgrid(px, py, indexing="ij")
+    PX = PX.ravel()
+    PY = PY.ravel()
+
+    bed = bed_elevation(PX)
+    surf = mound_surface_height(PX)
+    inside = (PY > bed + 1e-9) & (PY < surf)
+    return PX[inside].copy(), PY[inside].copy()
+
+
+
+# ============================================================================
+# 3. MPM ソルバー本体 (MLS-MPM + Drucker-Prager 砂塑性)
+# ============================================================================
+
+def solve_wave_number(omega, depth, g=GRAVITY, tol=1e-10, max_iter=100):
+    """線形波の分散関係 omega^2 = g k tanh(k depth) を Newton法で解き、波数 k を返す。"""
+    k = omega ** 2 / g  # 深海波近似を初期値とする
+    for _ in range(max_iter):
+        th = np.tanh(k * depth)
+        f = g * k * th - omega ** 2
+        fp = g * th + g * k * depth * (1.0 - th ** 2)
+        dk = f / fp
+        k -= dk
+        if abs(dk) < tol:
+            break
+    return k
+
+
+class MPMState:
+    """粒子・格子の状態と物性値をまとめて保持するだけの単純な入れ物。"""
+
+    def __init__(self):
+        px, py = make_mound_particles()
+        n = len(px)
+
+        self.n_particles = n
+        self.x = np.stack([px, py], axis=1)          # 粒子位置 (N,2)
+        self.v = np.zeros((n, 2))                     # 粒子速度 (N,2)
+        self.C = np.zeros((n, 2, 2))                  # APIC アフィン速度行列 (N,2,2)
+        self.F = np.tile(np.eye(2), (n, 1, 1))         # 弾性変形勾配 (N,2,2)
+
+        p_vol = (DX / PARTICLES_PER_CELL) ** 2
+        self.vol0 = np.full(n, p_vol)
+        self.mass = self.vol0 * RHO0
+
+        self.x0 = self.x.copy()  # 初期位置(比較プロット用に保持)
+
+        # --- Lame定数 ---
+        self.mu0 = E_MOD / (2.0 * (1.0 + NU))
+        self.lambda0 = E_MOD * NU / ((1.0 + NU) * (1.0 - 2.0 * NU))
+
+        # --- Drucker-Prager の摩擦パラメータ ---
+        # Mohr-Coulomb の内部摩擦角 phi に対応する Drucker-Prager 円錐の
+        # 傾き係数 (Klar et al. 2016 の定義に基づく近似)。
+        phi = np.radians(FRICTION_DEG)
+        self.alpha_dp = np.sqrt(2.0 / 3.0) * (2.0 * np.sin(phi)) / (3.0 - np.sin(phi))
+
+        # --- 背景格子 ---
+        self.nx = int(round(LX / DX)) + 1
+        self.ny = int(round(LY / DX)) + 1
+        self.n_nodes = self.nx * self.ny
+        self.inv_dx = 1.0 / DX
+        self.d_inv = 4.0 * self.inv_dx * self.inv_dx  # 2次Bスプラインの逆慣性係数
+
+        i_idx = np.repeat(np.arange(self.nx), self.ny)
+        j_idx = np.tile(np.arange(self.ny), self.nx)
+        node_x = i_idx.astype(np.float64) * DX
+        node_bed = bed_elevation(node_x)
+
+        # 海底(基盤)は沖に向かって深くなる勾配を持つため、下端固定境界
+        # (剛な不透過基盤)も一様な j<BOUND ではなく、各x位置での局所的な
+        # 海底標高 node_bed に沿って判定する(node_bed 以下=地盤内部は
+        # 当然固定、その上にさらにBOUND層分の緩衝層を追加して固定する)。
+        self.bottom_mask = (j_idx.astype(np.float64) * DX) < (node_bed + BOUND * DX)
+        self.side_mask = (i_idx < BOUND) | (i_idx > self.nx - 1 - BOUND)
+
+        # --- 波浪外力(簡易振動流モデル)用の準備 ---
+        self.node_i = i_idx
+        self.node_j = j_idx
+        self.node_y = j_idx.astype(np.float64) * DX
+        self.wave_mask = (self.node_y < WATER_LEVEL) & ~self.bottom_mask
+        self.wave_omega = 2.0 * np.pi / WAVE_PERIOD
+        self.wave_k = solve_wave_number(self.wave_omega, WATER_LEVEL)
+        self.wave_sinh_kd = np.sinh(self.wave_k * WATER_LEVEL)
+        self.wave_cosh_ky = np.cosh(self.wave_k * self.node_y)
+        self.wave_active_layer_cells = max(1, int(round(WAVE_ACTIVE_LAYER / DX)))
+
+        # --- 時間刻み(CFL条件) ---
+        wave_speed = np.sqrt((self.lambda0 + 2.0 * self.mu0) / RHO0)
+        dt_cfl = CFL * DX / wave_speed
+        self.n_substeps = max(1, int(np.ceil(FRAME_DT / dt_cfl)))
+        self.dt = FRAME_DT / self.n_substeps
+
+        wave_length = 2.0 * np.pi / self.wave_k
+
+        print(f"[MPM] 粒子数 = {n}")
+        print(f"[MPM] 格子ノード数 = {self.nx} x {self.ny} = {self.n_nodes}")
+        print(f"[MPM] dt = {self.dt:.3e} s, {self.n_substeps} substeps/frame")
+        print(f"[MPM] 海底勾配: bed(x)=({BED_Y0:.2f} - {BED_SLOPE:.3f}*x) m "
+              f"(x=0: y={bed_elevation(0.0):.3f} m, x={LX:.2f}: y={bed_elevation(LX):.3f} m)")
+        print(f"[MPM] マウンド天端の被覆水深(水没深さ, 岸側で最も浅いケース) = "
+              f"{SUBMERGENCE:.3f} m (静水面 y={WATER_LEVEL:.2f} m)")
+        if SUBMERGENCE <= 0.0:
+            print("[MPM] 警告: マウンド天端が静水面より高く、水没条件を満たしていません。")
+        print(f"[MPM] 波浪外力: H={WAVE_HEIGHT:.2f} m, T={WAVE_PERIOD:.2f} s, "
+              f"波長 L={wave_length:.2f} m (水深 d={WATER_LEVEL:.2f} m, 一様水深近似), "
+              f"抗力時定数 tau={WAVE_DRAG_TIME:.3f} s, "
+              f"活動層厚={WAVE_ACTIVE_LAYER:.3f} m ({self.wave_active_layer_cells} セル)")
+
+
+def _bspline_weights(fx):
+    """2次 B-スプライン形状関数の重み。fx: 各次元でセル内の相対座標(範囲[0.5,1.5))"""
+    w0 = 0.5 * (1.5 - fx) ** 2
+    w1 = 0.75 - (fx - 1.0) ** 2
+    w2 = 0.5 * (fx - 0.5) ** 2
+    return np.stack([w0, w1, w2], axis=-1)  # shape (N, dim, 3)
+
+
+# ----------------------------------------------------------------------------
+# 高速化ヘルパー: (N,2,2) のバッチ処理に特化した明示的な演算。
+#
+# np.einsum / np.linalg.svd は汎用的だが、2x2という極小行列を数千〜数万個
+# バッチ処理する用途では、1回あたりのディスパッチ/LAPACK呼び出しオーバー
+# ヘッドが支配的になり非常に遅い(この関数群を使わない実装に対して
+# プロファイリングで実測: SVDだけで約27倍、全体で1桁以上の高速化)。
+# 以下はすべて成分ごとの四則演算のみで書き下し、そのオーバーヘッドを避ける。
+# ----------------------------------------------------------------------------
+
+def matmul2x2(A, B):
+    """バッチ (N,2,2) 行列積 A @ B を成分ごとの演算で計算する。"""
+    C = np.empty_like(A)
+    C[:, 0, 0] = A[:, 0, 0] * B[:, 0, 0] + A[:, 0, 1] * B[:, 1, 0]
+    C[:, 0, 1] = A[:, 0, 0] * B[:, 0, 1] + A[:, 0, 1] * B[:, 1, 1]
+    C[:, 1, 0] = A[:, 1, 0] * B[:, 0, 0] + A[:, 1, 1] * B[:, 1, 0]
+    C[:, 1, 1] = A[:, 1, 0] * B[:, 0, 1] + A[:, 1, 1] * B[:, 1, 1]
+    return C
+
+
+def svd2x2(A):
+    """バッチ (N,2,2) 行列の特異値分解 A = U @ diag(sigma) @ Vt を閉形式で計算する。
+
+    A^T A の固有分解(対称2x2行列の固有値・固有ベクトルは解析的に書ける)から
+    V と sigma>=0 を直接求め、U = A V / sigma で復元する。sigma=0 の退化ケース
+    (u ベクトルが定義できない)は直交補完で埋める。np.linalg.svd と等価な
+    分解を返すが、LAPACKの反復解法を経由しないため大幅に高速。
+    """
+    a = A[:, 0, 0]
+    b = A[:, 0, 1]
+    c = A[:, 1, 0]
+    d = A[:, 1, 1]
+
+    # A^T A の成分 (対称行列)
+    m11 = a * a + c * c
+    m12 = a * b + c * d
+    m22 = b * b + d * d
+
+    phi = 0.5 * np.arctan2(2.0 * m12, m11 - m22)
+    cp = np.cos(phi)
+    sp = np.sin(phi)
+
+    mean = 0.5 * (m11 + m22)
+    disc = np.sqrt(np.clip(((m11 - m22) * 0.5) ** 2 + m12 ** 2, 0.0, None))
+    sigma1 = np.sqrt(np.clip(mean + disc, 0.0, None))
+    sigma2 = np.sqrt(np.clip(mean - disc, 0.0, None))
+
+    v1x, v1y = cp, sp
+    v2x, v2y = -sp, cp
+
+    u1x = a * v1x + b * v1y
+    u1y = c * v1x + d * v1y
+    u2x = a * v2x + b * v2y
+    u2y = c * v2x + d * v2y
+
+    eps = 1e-12
+    n1 = np.hypot(u1x, u1y)
+    n2 = np.hypot(u2x, u2y)
+    ok1 = n1 > eps
+    ok2 = n2 > eps
+    u1x = np.where(ok1, u1x / np.where(ok1, n1, 1.0), 1.0)
+    u1y = np.where(ok1, u1y / np.where(ok1, n1, 1.0), 0.0)
+    # sigma2 がほぼ0で u2 の向きが定まらない場合は u1 の直交補完で埋める
+    u2x_alt = -u1y
+    u2y_alt = u1x
+    u2x = np.where(ok2, u2x / np.where(ok2, n2, 1.0), u2x_alt)
+    u2y = np.where(ok2, u2y / np.where(ok2, n2, 1.0), u2y_alt)
+
+    U = np.empty_like(A)
+    U[:, 0, 0] = u1x
+    U[:, 1, 0] = u1y
+    U[:, 0, 1] = u2x
+    U[:, 1, 1] = u2y
+
+    Vt = np.empty_like(A)
+    Vt[:, 0, 0] = v1x
+    Vt[:, 0, 1] = v1y
+    Vt[:, 1, 0] = v2x
+    Vt[:, 1, 1] = v2y
+
+    sigma = np.stack([sigma1, sigma2], axis=1)
+    return U, sigma, Vt
+
+
+def substep(s: MPMState, t: float):
+    """MLS-MPM の1ステップ (P2G -> 格子更新 -> G2P) を実行し、状態を更新する。
+
+    t: 現在のシミュレーション時刻 [s] (波浪外力の位相計算に用いる)。
+    """
+    dt = s.dt
+    inv_dx = s.inv_dx
+    ny = s.ny
+    n = s.n_particles
+
+    # ------------------------------------------------------------------
+    # (a) 変形勾配の更新 + Drucker-Prager リターンマッピング
+    # ------------------------------------------------------------------
+    M = np.empty_like(s.C)
+    M[:, 0, 0] = 1.0 + dt * s.C[:, 0, 0]
+    M[:, 0, 1] = dt * s.C[:, 0, 1]
+    M[:, 1, 0] = dt * s.C[:, 1, 0]
+    M[:, 1, 1] = 1.0 + dt * s.C[:, 1, 1]
+    F_trial = matmul2x2(M, s.F)
+
+    U, sigma, Vt = svd2x2(F_trial)
+    sigma = np.clip(sigma, 1e-6, None)
+
+    eps = np.log(sigma)                       # Hencky(対数)ひずみの主値 (N,2)
+    tr_eps = eps.sum(axis=1)                  # 体積ひずみ成分
+    eps_hat = eps - 0.5 * tr_eps[:, None]      # 偏差成分
+    eps_hat_norm = np.linalg.norm(eps_hat, axis=1)
+
+    # Drucker-Prager 降伏関数からのリターンマッピング量
+    delta_gamma = eps_hat_norm + (2.0 * s.lambda0 + 2.0 * s.mu0) / (2.0 * s.mu0) * tr_eps * s.alpha_dp
+
+    new_eps = eps.copy()
+
+    has_shear = eps_hat_norm > 1e-12
+    plastic = has_shear & (delta_gamma > 0.0) & (tr_eps <= 0.0)
+    scale = np.zeros_like(eps_hat_norm)
+    scale[plastic] = delta_gamma[plastic] / eps_hat_norm[plastic]
+    new_eps[plastic] = eps[plastic] - scale[plastic, None] * eps_hat[plastic]
+
+    tension = tr_eps > 0.0  # 引張(体積膨張)側は砂は応力を負担できない -> 応力解放
+    new_eps[tension] = 0.0
+
+    new_sigma = np.exp(new_eps)
+    # F_elastic = U @ diag(new_sigma) @ Vt (対角行列の右積は列のスケーリング)
+    UD = U * new_sigma[:, None, :]
+    F_elastic = matmul2x2(UD, Vt)
+
+    # Hencky 弾性による Kirchhoff応力 (主応力を U で世界座標系へ回転)
+    # tau = U @ diag(stress) @ U^T
+    tr_new = new_eps.sum(axis=1)
+    principal_stress = 2.0 * s.mu0 * new_eps + s.lambda0 * tr_new[:, None]
+    UD2 = U * principal_stress[:, None, :]
+    Ut = U.transpose(0, 2, 1)
+    tau = matmul2x2(UD2, Ut)
+
+    stress_term = (-dt * s.d_inv * s.vol0)[:, None, None] * tau
+    affine = stress_term + s.mass[:, None, None] * s.C
+
+    # ------------------------------------------------------------------
+    # (b) Particle-to-Grid (P2G)
+    # ------------------------------------------------------------------
+    base = np.floor(s.x * inv_dx - 0.5).astype(np.int64)
+    fx = s.x * inv_dx - base.astype(np.float64)
+    w = _bspline_weights(fx)  # (N,2,3)
+
+    # 3x3近傍(9オフセット)をまとめて1つの (N,9,...) 配列として処理し、
+    # 散布加算(P2G)は np.add.at の代わりに np.bincount でまとめて行う
+    # (np.add.at は重複インデックスに対する非バッファ処理のため大幅に遅い)。
+    offsets = np.array([[i, j] for i in range(3) for j in range(3)], dtype=np.float64)  # (9,2)
+    node_i = base[:, 0:1] + offsets[None, :, 0].astype(np.int64)   # (N,9)
+    node_j = base[:, 1:2] + offsets[None, :, 1].astype(np.int64)   # (N,9)
+    flat_idx = (node_i * ny + node_j).ravel()                      # (N*9,)
+
+    dpos = (offsets[None, :, :] - fx[:, None, :]) * DX             # (N,9,2)
+    weight = (w[:, 0, :, None] * w[:, 1, None, :]).reshape(n, 9)   # (N,9)  [i,j]順=offsets順と一致
+
+    affine_dpos = np.empty((n, 9, 2))
+    affine_dpos[:, :, 0] = affine[:, 0, 0:1] * dpos[:, :, 0] + affine[:, 0, 1:2] * dpos[:, :, 1]
+    affine_dpos[:, :, 1] = affine[:, 1, 0:1] * dpos[:, :, 0] + affine[:, 1, 1:2] * dpos[:, :, 1]
+
+    contrib_v = weight[:, :, None] * (s.mass[:, None, None] * s.v[:, None, :] + affine_dpos)
+    contrib_m = weight * s.mass[:, None]
+
+    grid_m = np.bincount(flat_idx, weights=contrib_m.ravel(), minlength=s.n_nodes)
+    grid_vx = np.bincount(flat_idx, weights=contrib_v[:, :, 0].ravel(), minlength=s.n_nodes)
+    grid_vy = np.bincount(flat_idx, weights=contrib_v[:, :, 1].ravel(), minlength=s.n_nodes)
+    grid_v = np.stack([grid_vx, grid_vy], axis=1)
+
+    # ------------------------------------------------------------------
+    # (c) 格子上の更新: 質量で正規化し、重力を与え、境界条件を課す
+    # ------------------------------------------------------------------
+    has_mass = grid_m > 1e-12
+    grid_v[has_mass] /= grid_m[has_mass, None]
+    grid_v[has_mass, 1] -= dt * GRAVITY
+    grid_v *= DAMPING
+
+    # --- 波浪外力(簡易振動流モデル、表層の活動層のみに作用) ---
+    # 静水面以下のノードに線形波理論の水平往復流速を目標値として与え、
+    # 格子速度をその目標値へ緩和させる(空間位相 kx は無視し、時間変化のみ考慮)。
+    # ただし、その時点(変形後)のマウンド表面から WAVE_ACTIVE_LAYER の厚み
+    # 分だけを対象とし、内部に埋もれた粒子には作用させない。表面位置は
+    # 毎ステップ、格子質量 grid_m から「各x列で質量を持つ最上端ノード」
+    # として動的に検出する(粒子を直接ビニングするより、既に計算済みの
+    # grid_m を再利用する方が安価)。
+    ramp = min(t / (WAVE_RAMP_CYCLES * WAVE_PERIOD), 1.0)
+    if ramp > 0.0:
+        mass_2d = grid_m.reshape(s.nx, s.ny)
+        j_range = np.arange(s.ny)
+        j_if_mass = np.where(mass_2d > 1e-12, j_range[None, :], -1)
+        j_surface = j_if_mass.max(axis=1)                       # (nx,) 列ごとの表面ノード添字(質量なしなら-1)
+
+        depth_cells = j_surface[s.node_i] - s.node_j             # 表面から何セル下か(負なら表面より上=空気)
+        active_layer = (depth_cells >= 0) & (depth_cells < s.wave_active_layer_cells)
+
+        u_target = (ramp * np.pi * WAVE_HEIGHT / WAVE_PERIOD
+                    * s.wave_cosh_ky / s.wave_sinh_kd * np.cos(s.wave_omega * t))
+        drag_coef = min(dt / WAVE_DRAG_TIME, 1.0)
+        wave_active = s.wave_mask & has_mass & active_layer
+        grid_v[wave_active, 0] += drag_coef * (u_target[wave_active] - grid_v[wave_active, 0])
+
+    grid_v[s.bottom_mask] = 0.0        # 海底: 固定(剛な不透過基盤、勾配に沿って局所判定)
+    grid_v[s.side_mask, 0] = 0.0       # 左右端: 水平方向のみ固定(スリップ壁)
+
+    # ------------------------------------------------------------------
+    # (d) Grid-to-Particle (G2P)
+    # ------------------------------------------------------------------
+    gv = grid_v[flat_idx].reshape(n, 9, 2)                # 散布ではなく収集(gather)なので add.at 不要
+
+    new_v = (weight[:, :, None] * gv).sum(axis=1)          # (N,2)
+
+    new_C = np.empty((n, 2, 2))
+    wC = s.d_inv * weight
+    new_C[:, 0, 0] = (wC * gv[:, :, 0] * dpos[:, :, 0]).sum(axis=1)
+    new_C[:, 0, 1] = (wC * gv[:, :, 0] * dpos[:, :, 1]).sum(axis=1)
+    new_C[:, 1, 0] = (wC * gv[:, :, 1] * dpos[:, :, 0]).sum(axis=1)
+    new_C[:, 1, 1] = (wC * gv[:, :, 1] * dpos[:, :, 1]).sum(axis=1)
+
+    x_new = s.x + dt * new_v
+
+    # 数値的な安全策: 万一の発散で粒子が領域外に出ないようクリップする
+    x_new[:, 0] = np.clip(x_new[:, 0], DX, LX - DX)
+    x_new[:, 1] = np.clip(x_new[:, 1], DX, LY - DX)
+
+    s.x = x_new
+    s.v = new_v
+    s.C = new_C
+    s.F = F_elastic
+
+
+
+# ============================================================================
+# 4. 後処理(断面形状の可視化)
+# ============================================================================
+
+def top_envelope(x, y, x_max=LX, bin_width=None):
+    """粒子群から x方向にビニングし、各binの最高高さ(=マウンド表面)を抽出する。"""
+    if bin_width is None:
+        bin_width = 4 * DX
+    bins = np.arange(0.0, x_max + bin_width, bin_width)
+    idx = np.digitize(x, bins) - 1
+    n_bins = len(bins) - 1
+
+    top_y = np.full(n_bins, np.nan)
+    for b in range(n_bins):
+        mask = idx == b
+        if np.any(mask):
+            top_y[b] = y[mask].max()
+
+    centers = 0.5 * (bins[:-1] + bins[1:])
+    valid = ~np.isnan(top_y)
+    return centers[valid], top_y[valid]
+
+
+def plot_results(snapshots, s: MPMState, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+
+    bed_x = np.linspace(0.0, LX, 200)
+    bed_y = bed_elevation(bed_x)
+
+    # --- (a) 粒子位置スナップショットの重ね描き ---
+    fig, ax = plt.subplots(figsize=(9, 4))
+    n_snap = len(snapshots)
+    for k, (t, x) in enumerate(snapshots):
+        color = plt.cm.viridis(k / max(n_snap - 1, 1))
+        alpha = 0.25 if 0 < k < n_snap - 1 else 0.9
+        size = 2 if 0 < k < n_snap - 1 else 4
+        ax.scatter(x[:, 0], x[:, 1], s=size, color=color, alpha=alpha,
+                   label=f"t={t:.2f}s" if k in (0, n_snap - 1) else None)
+    ax.plot(bed_x, bed_y, color="tab:brown", linewidth=1.5,
+            label="海底(bed_elevation)")
+    ax.axhline(WATER_LEVEL, color="tab:blue", linestyle=":", linewidth=1.5,
+               label=f"静水面 SWL (y={WATER_LEVEL:.2f}m)")
+    ax.set_xlabel("岸沖距離 x [m]")
+    ax.set_ylabel("高さ y [m]")
+    ax.set_title("沖合養浜マウンドの自重変形+波浪外力による変形 (MPM, 海底勾配あり)")
+    ax.set_xlim(0, LX)
+    ax.set_ylim(0, LY)
+    ax.set_aspect("equal")
+    ax.legend(loc="upper right")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "particles_overlay.png"), dpi=150)
+
+    # --- (b) 初期断面 vs 最終断面(表面プロファイル比較) ---
+    t0, x0 = snapshots[0]
+    t1, x1 = snapshots[-1]
+    xe0, ye0 = top_envelope(x0[:, 0], x0[:, 1])
+    xe1, ye1 = top_envelope(x1[:, 0], x1[:, 1])
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(xe0, ye0, "--", color="gray", label=f"初期断面 (t={t0:.2f}s)")
+    ax.plot(xe1, ye1, "-", color="tab:orange", label=f"最終断面 (t={t1:.2f}s)")
+    ax.plot(bed_x, bed_y, color="tab:brown", linewidth=1.5,
+            label="海底(bed_elevation)")
+    ax.axhline(WATER_LEVEL, color="tab:blue", linestyle=":", linewidth=1.5,
+               label=f"静水面 SWL (y={WATER_LEVEL:.2f}m)")
+    ax.set_xlabel("岸沖距離 x [m]")
+    ax.set_ylabel("高さ y [m]")
+    ax.set_title("沖合養浜マウンド断面形状の変化(自重沈下・法面変形+波浪外力、海底勾配あり)")
+    ax.set_xlim(0, LX)
+    ax.set_ylim(0, max(WATER_LEVEL, MOUND_HEIGHT + bed_elevation(0.0)) * 1.3)
+    ax.legend(loc="upper right")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "profile_comparison.png"), dpi=150)
+    plt.show()
+
+    print(f"[MPM] 図を保存しました: {out_dir}")
+
+
+
+# ============================================================================
+# 5. メイン実行
+# ============================================================================
+
+def run():
+    state = MPMState()
+
+    n_frames = int(round(T_TOTAL / FRAME_DT))
+    snapshots = [(0.0, state.x.copy())]
+
+    t = 0.0
+    for frame in range(n_frames):
+        for _ in range(state.n_substeps):
+            substep(state, t)
+            t += state.dt
+        snapshots.append((t, state.x.copy()))
+
+        if frame % max(1, n_frames // 10) == 0 or frame == n_frames - 1:
+            print(f"[MPM] frame {frame + 1}/{n_frames}  t={t:.3f}s  "
+                  f"max|v|={np.linalg.norm(state.v, axis=1).max():.3f} m/s")
+
+        np.savez(
+            os.path.join(OUTPUT_DIR, f"snapshot_{frame:04d}.npz"),
+            t=t, x=state.x, v=state.v,
+        )
+
+    plot_results(snapshots, state, OUTPUT_DIR)
+    return state, snapshots
+
+
+
+def _parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="MPM沖合養浜マウンド自重変形解析(海底勾配あり)。"
+                     "--t-total で総計算時間を延長できる。"
+    )
+    parser.add_argument(
+        "--t-total", type=float, default=None,
+        help=f"総計算時間 [s] (省略時はコード内の既定値 T_TOTAL={T_TOTAL}s を使用)",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="出力先ディレクトリ(省略時は output/。長時間実行では過去の出力を"
+             "上書きしないよう別ディレクトリを指定することを推奨)",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    if args.t_total is not None:
+        T_TOTAL = args.t_total
+    if args.output_dir is not None:
+        OUTPUT_DIR = args.output_dir
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    state, snapshots = run()
+
+
+# ============================================================================
+# 拡張のヒント (研究を進める際の追加要素の例)
+# ============================================================================
+# - 波浪外力(発展): 現状は対称な線形波(Airy波)の往復流速を目標値とする
+#   簡易抗力モデルのみで、往復せん断による緩み・沈下・法面変形が主体となる。
+#   また分散関係の評価は海底勾配を無視した一様水深(WATER_LEVEL)のままなので、
+#   bed_elevation(x) から局所水深 d(x)=WATER_LEVEL-bed_elevation(x) を求め、
+#   ノードごとに solve_wave_number(omega, d(x)) を評価すれば浅水変形(屈折・
+#   波高変化)を近似的に取り込める。浅水変形に伴う波形の非対称性
+#   (スキューネス、沖向きより岸向きの流速が強く短時間なピーク形状)を
+#   u_target に第2高調波項(2*wave_omega*t 成分)として加えると、片方向
+#   (岸向き)への正味の土砂移動(マウンド全体の岸側への這い上がり)を
+#   表現できる。本格的にはXBeach等の外部モデルの出力(水位・波高・底面
+#   流速等)を読み込み、時間ステップごとに力へ変換して与える一方向
+#   カップリングへ拡張できる(akiya_mpm_nourishment/xbeach_forcing.py が
+#   参考になる)。
+# - 移動限界(threshold of motion): 現状は流速の大小によらず常に抗力が
+#   働くが、Shields数等に基づく限界流速以下では抗力を働かせない(=侵食が
+#   起きない)ようにすると、より物理的な侵食開始条件を表現できる。
+# - 海底勾配の形状: 現状は bed_elevation(x) を一次関数(一様勾配)として
+#   実装しているが、実測断面(等深線データ等)を線形補間する関数に
+#   差し替えれば、任意の実海岸地形上での解析ができる。Dean の平衡断面
+#   (水深 h(x) = A x^(2/3) 型)等、経験的な海浜横断形状関数への置き換えも
+#   容易。
+# - 侵食・堆積の定量評価: フレームごとに top_envelope() を計算して保存し、
+#   初期からの高さ変化 dz(x) や断面積変化(侵食量・堆積量)を時系列で追跡する。
+# - 複数材料: 粒子ごとに material_id 配列を持たせ、密度・ヤング率・摩擦角を
+#   材料IDごとに切り替える(例: 在来海底砂 と 養浜材(礫)を区別する)。
+# - 粘着力(cohesion): Drucker-Prager 降伏関数に定数項を加え、
+#   delta_gamma の閾値をオフセットすることでシルト分を含む養浜材等の
+#   粘着力を表現できる。
+# - 間隙水圧・排水過程: 現状は「密度を水中密度に置き換える」簡易的な浮力
+#   モデルのみ。過剰間隙水圧の発生・消散(圧密)を扱う二相系(砂粒子+間隙水)
+#   に拡張すれば、地震時液状化等も評価できる。
+# - 高速化: 粒子数が多い場合は Taichi 等でこのアルゴリズムをGPU化すると
+#   大規模・長時間の計算が現実的になる(本コードのロジックは
+#   Taichiへの移植を前提に、1ステップの処理を明示的に分解して書いている)。
