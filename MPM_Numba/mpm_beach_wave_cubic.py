@@ -38,6 +38,9 @@ VSCode でグラフをインライン表示する方法
 - 実行結果の断面図・時系列図は常に PNG として output/ (または各ファイル
   固有の出力先) に保存されるため、VSCode のエクスプローラーでPNGファイルを
   クリックすれば画像プレビューとして閲覧できる。
+- 同じタイミング(メイン計算ループ終了直後)で、計算開始~終了までの粒子の
+  動きを可視化した particles_animation.gif も同じ出力先に保存される
+  (mpm_animation.py の save_particle_gif を参照)。
 - それに加えて、本ファイルは `# %%` でセル分割されているため、VSCode の
   Python拡張機能を使えば「Run Cell」または「Run Current File in Interactive
   Window」でJupyter形式のインタラクティブウィンドウとして実行できる。
@@ -52,6 +55,8 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from numba import njit
+
+import mpm_animation
 
 plt.rcParams["font.family"] = ["Hiragino Sans", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -653,6 +658,17 @@ def plot_results(snapshots, s: MPMState, out_dir):
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "profile_comparison.png"), dpi=150)
+
+    # --- (c) 計算開始~終了の粒子の動きをGIFアニメーションとして保存 ---
+    # (plt.show() より前に実行する: 対話的backendでのplt.show()は環境に
+    #  よって失敗しうるため、GIF保存はその影響を受けないようにする)
+    mpm_animation.save_particle_gif(
+        snapshots,
+        os.path.join(out_dir, "particles_animation.gif"),
+        lx=LX, ly=LY, water_level=WATER_LEVEL,
+        title="沖合養浜マウンドの自重変形+波浪外力による変形 (MPM, Numba, 3次B-スプライン)",
+    )
+
     plt.show()
 
     print(f"[MPM] 図を保存しました: {out_dir}")
