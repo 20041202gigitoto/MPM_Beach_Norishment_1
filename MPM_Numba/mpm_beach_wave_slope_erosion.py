@@ -30,8 +30,21 @@ mpm_beach_wave_slope.py (Numba版) との違い
 --------
     python mpm_beach_wave_slope_erosion.py
     python mpm_beach_wave_slope_erosion.py --t-total 12.0 --image-interval 100
+
+
+VSCode でグラフをインライン表示する方法
+----------------------------------------
+- 実行結果の断面図・時系列図は常に PNG として output/ (または各ファイル
+  固有の出力先) に保存されるため、VSCode のエクスプローラーでPNGファイルを
+  クリックすれば画像プレビューとして閲覧できる。
+- それに加えて、本ファイルは `# %%` でセル分割されているため、VSCode の
+  Python拡張機能を使えば「Run Cell」または「Run Current File in Interactive
+  Window」でJupyter形式のインタラクティブウィンドウとして実行できる。
+  この方法で実行すると、`plt.show()` が別ウィンドウを開く代わりに、
+  インタラクティブウィンドウ内にグラフがそのままインライン表示される。
 """
 
+# %%
 import os
 import argparse
 
@@ -44,6 +57,7 @@ plt.rcParams["font.family"] = ["Hiragino Sans", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
+# %%
 # ============================================================================
 # 1. このファイル独自のパラメータ
 # ============================================================================
@@ -55,6 +69,7 @@ ENVELOPE_BIN_WIDTH = 4 * base.DX   # ビニング幅(base.top_envelope の既定
 OUTPUT_DIR = os.path.join(base.OUTPUT_DIR, "erosion_tracking")
 
 
+# %%
 # ============================================================================
 # 2. 表面プロファイル抽出(フレーム間で位置が対応する固定ビン版)
 # ============================================================================
@@ -96,6 +111,7 @@ def area_changes(dz, bin_width=ENVELOPE_BIN_WIDTH):
     return deposition, erosion, net
 
 
+# %%
 # ============================================================================
 # 3. 実行ループ(base.substep を流用し、毎フレーム表面プロファイルを記録)
 # ============================================================================
@@ -170,6 +186,7 @@ def run(t_total=None, output_dir=None):
     return state, times, x_centers, envelopes, dz_series
 
 
+# %%
 # ============================================================================
 # 4. 可視化
 # ============================================================================
@@ -263,6 +280,7 @@ def _plot_summary(times, x_centers, dz_series, dep_series, ero_series, net_serie
     plt.show()
 
 
+# %%
 # ============================================================================
 # 5. メイン実行
 # ============================================================================
@@ -279,7 +297,11 @@ def _parse_args():
                          help="表面プロファイル(dz)を記録するフレーム間隔")
     parser.add_argument("--image-interval", type=int, default=IMAGE_SAVE_INTERVAL_FRAMES,
                          help="断面差分(堆積・侵食)画像を保存するフレーム間隔")
-    return parser.parse_args()
+    # VSCode の Interactive Window / Jupyter 経由で実行すると sys.argv に
+    # カーネル起動用の引数(-f <connection_file> 等)が混入するため、
+    # 未知の引数は無視する parse_known_args() を使う。
+    args, _unknown = parser.parse_known_args()
+    return args
 
 
 if __name__ == "__main__":
