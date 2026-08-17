@@ -98,7 +98,7 @@ def save_particle_gif(
     frames = [snapshots[i] for i in idx]
     colors = [color_values[i] for i in idx] if color_values is not None else None
 
-    fig = Figure(figsize=(9, 4))
+    fig = Figure(figsize=(10, 4))
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111)
     t0, x0 = frames[0]
@@ -112,7 +112,10 @@ def save_particle_gif(
                 vmax = vmin + 1e-9
         scat = ax.scatter(x0[:, 0], x0[:, 1], s=3, c=colors[0], cmap=cmap,
                            vmin=vmin, vmax=vmax)
-        fig.colorbar(scat, ax=ax, label=color_label)
+        # fraction/padを絞って細いカラーバーにし、タイトル・グラフ本体の
+        # 表示領域を圧迫しないようにする(既定値は幅が広すぎてタイトルが
+        # はみ出す原因になっていた)。
+        fig.colorbar(scat, ax=ax, label=color_label, fraction=0.035, pad=0.02)
     else:
         scat = ax.scatter(x0[:, 0], x0[:, 1], s=3, color="tab:orange")
 
@@ -129,7 +132,7 @@ def save_particle_gif(
     ax.set_aspect("equal")
     ax.legend(loc="upper right")
     ax.grid(alpha=0.3)
-    ax.set_title(f"{title} (t={t0:.2f}s)")
+    ax.set_title(f"{title} (t={t0:.2f}s)", fontsize=10)
     fig.tight_layout()
 
     def update(frame_idx):
@@ -137,7 +140,7 @@ def save_particle_gif(
         scat.set_offsets(x)
         if colors is not None:
             scat.set_array(colors[frame_idx])
-        ax.set_title(f"{title} (t={t:.2f}s)")
+        ax.set_title(f"{title} (t={t:.2f}s)", fontsize=10)
         return scat,
 
     anim = FuncAnimation(fig, update, frames=len(frames), blit=False)
