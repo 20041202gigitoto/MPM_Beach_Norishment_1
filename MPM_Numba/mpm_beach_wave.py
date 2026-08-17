@@ -707,11 +707,6 @@ def run():
             print(f"[MPM] frame {frame + 1}/{n_frames}  t={t:.3f}s  "
                   f"max|v|={np.linalg.norm(state.v, axis=1).max():.3f} m/s")
 
-        np.savez(
-            os.path.join(OUTPUT_DIR, f"snapshot_{frame:04d}.npz"),
-            t=t, x=state.x, v=state.v,
-        )
-
     plot_results(snapshots, state, OUTPUT_DIR)
     return state, snapshots
 
