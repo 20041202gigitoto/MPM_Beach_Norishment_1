@@ -36,6 +36,11 @@ def save_particle_gif(
     fps=25,
     dpi=100,
     max_frames=300,
+    color_values=None,
+    cmap="coolwarm",
+    color_label="速さ |v| [m/s]",
+    vmin=None,
+    vmax=None,
 ):
     """粒子位置スナップショットからGIFアニメーションを生成して保存する。
 
@@ -64,10 +69,26 @@ def save_particle_gif(
         GIFに含める最大フレーム数。snapshotsがこれより多い場合は等間隔で
         間引く(フレーム数が多すぎるとファイルサイズ・生成時間が過大になる
         ため)。先頭・末尾フレームは必ず含める。
+    color_values : list[np.ndarray], optional
+        snapshotsと同じ長さ・同じ粒子順序を持つスカラー配列のリスト
+        (例: 各フレームでの粒子の速さ |v|)。指定すると、各粒子を
+        この値に応じて cmap で色分けする(動きが激しい粒子ほど暖色、
+        動いていない粒子ほど寒色になるよう、既定では cmap="coolwarm"
+        [青=低速/寒色 → 赤=高速/暖色] を使用)。省略時は単色(オレンジ)
+        で描画する。
+    cmap : str
+        color_values 指定時に使うカラーマップ名。
+    color_label : str
+        カラーバーのラベル。
+    vmin, vmax : float, optional
+        色スケールの下限・上限。省略時は全フレームの color_values 全体
+        から自動決定する(vmin=0, vmax=99パーセンタイル)。
     """
     n_total = len(snapshots)
     if n_total == 0:
         raise ValueError("snapshots が空です")
+    if color_values is not None and len(color_values) != n_total:
+        raise ValueError("color_values は snapshots と同じ長さである必要があります")
 
     if n_total > max_frames:
         idx = np.linspace(0, n_total - 1, max_frames).round().astype(int)
@@ -75,12 +96,25 @@ def save_particle_gif(
     else:
         idx = list(range(n_total))
     frames = [snapshots[i] for i in idx]
+    colors = [color_values[i] for i in idx] if color_values is not None else None
 
     fig = Figure(figsize=(9, 4))
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111)
     t0, x0 = frames[0]
-    scat = ax.scatter(x0[:, 0], x0[:, 1], s=3, color="tab:orange")
+
+    if colors is not None:
+        if vmin is None:
+            vmin = 0.0
+        if vmax is None:
+            vmax = float(np.percentile(np.concatenate(colors), 99))
+            if vmax <= vmin:
+                vmax = vmin + 1e-9
+        scat = ax.scatter(x0[:, 0], x0[:, 1], s=3, c=colors[0], cmap=cmap,
+                           vmin=vmin, vmax=vmax)
+        fig.colorbar(scat, ax=ax, label=color_label)
+    else:
+        scat = ax.scatter(x0[:, 0], x0[:, 1], s=3, color="tab:orange")
 
     if bed_x is not None and bed_y is not None:
         ax.plot(bed_x, bed_y, color="tab:brown", linewidth=1.5, label="海底")
@@ -101,6 +135,8 @@ def save_particle_gif(
     def update(frame_idx):
         t, x = frames[frame_idx]
         scat.set_offsets(x)
+        if colors is not None:
+            scat.set_array(colors[frame_idx])
         ax.set_title(f"{title} (t={t:.2f}s)")
         return scat,
 

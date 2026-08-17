@@ -598,7 +598,7 @@ def top_envelope(x, y, x_max=LX, bin_width=None):
     return centers[valid], top_y[valid]
 
 
-def plot_results(snapshots, s: MPMState, out_dir):
+def plot_results(snapshots, s: MPMState, out_dir, speeds=None):
     os.makedirs(out_dir, exist_ok=True)
 
     bed_x = np.linspace(0.0, LX, 200)
@@ -660,6 +660,7 @@ def plot_results(snapshots, s: MPMState, out_dir):
         lx=LX, ly=LY, water_level=WATER_LEVEL,
         bed_x=bed_x, bed_y=bed_y,
         title="沖合養浜マウンドの自重変形+波浪外力による変形 (MPM, Numba, 海底勾配+3次B-スプライン)",
+        color_values=speeds,
     )
 
     plt.show()
@@ -678,6 +679,7 @@ def run():
 
     n_frames = int(round(T_TOTAL / FRAME_DT))
     snapshots = [(0.0, state.x.copy())]
+    speeds = [np.linalg.norm(state.v, axis=1).copy()]
 
     t = 0.0
     for frame in range(n_frames):
@@ -685,6 +687,7 @@ def run():
             substep(state, t)
             t += state.dt
         snapshots.append((t, state.x.copy()))
+        speeds.append(np.linalg.norm(state.v, axis=1).copy())
 
         if frame % max(1, n_frames // 10) == 0 or frame == n_frames - 1:
             print(f"[MPM] frame {frame + 1}/{n_frames}  t={t:.3f}s  "
@@ -695,7 +698,7 @@ def run():
             t=t, x=state.x, v=state.v,
         )
 
-    plot_results(snapshots, state, OUTPUT_DIR)
+    plot_results(snapshots, state, OUTPUT_DIR, speeds=speeds)
     return state, snapshots
 
 
