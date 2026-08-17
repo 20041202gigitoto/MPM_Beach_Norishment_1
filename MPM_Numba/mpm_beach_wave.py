@@ -123,7 +123,7 @@ T_TOTAL = 6.0        # 総計算時間 [s] (WAVE_PERIOD=1.6sで約3.75周期分)
 FRAME_DT = 0.02      # スナップショットを保存する時間間隔 [s]
 
 # ---- 出力 ----
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_wave")
 
 
 
@@ -712,7 +712,7 @@ def _parse_args():
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
-        help="出力先ディレクトリ(省略時は output/。長時間実行では過去の出力を"
+        help="出力先ディレクトリ(省略時は output_wave/。長時間実行では過去の出力を"
              "上書きしないよう別ディレクトリを指定することを推奨)",
     )
     # VSCode の Interactive Window / Jupyter 経由で実行すると sys.argv に

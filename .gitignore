@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 mpm_scratch/output/
 .DS_Store
+snapshot_*.npz
+MPM_Numba/logs/
